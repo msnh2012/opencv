@@ -4,10 +4,14 @@
 //
 // Copyright (C) 2019 Intel Corporation
 
-#include "opencv2/gapi/gcomputation_async.hpp"
-#include "opencv2/gapi/gcomputation.hpp"
-#include "opencv2/gapi/gcompiled_async.hpp"
-#include "opencv2/gapi/gcompiled.hpp"
+
+#include <opencv2/gapi/gcomputation_async.hpp>
+#include <opencv2/gapi/gcomputation.hpp>
+#include <opencv2/gapi/gcompiled_async.hpp>
+#include <opencv2/gapi/gcompiled.hpp>
+#include <opencv2/gapi/gasync_context.hpp>
+
+#include <opencv2/gapi/util/copy_through_move.hpp>
 
 #include <condition_variable>
 
@@ -16,16 +20,6 @@
 #include <stdexcept>
 #include <queue>
 
-namespace {
-    //This is a tool to move initialize captures of a lambda in C++11
-    template<typename T>
-    struct move_through_copy{
-       T value;
-       move_through_copy(T&& g) : value(std::move(g)) {}
-       move_through_copy(move_through_copy&&) = default;
-       move_through_copy(move_through_copy const& lhs) : move_through_copy(std::move(const_cast<move_through_copy&>(lhs))) {}
-    };
-}
 
 namespace cv {
 namespace gapi {
@@ -43,8 +37,15 @@ class async_service {
 
     std::thread thrd;
 
-public:
     async_service() = default ;
+
+public:
+    // singleton
+    static async_service& instance()
+    {
+        static async_service the_ctx;
+        return the_ctx;
+    }
 
     void add_task(std::function<void()>&& t){
         if (!thread_started)
@@ -80,6 +81,7 @@ public:
                 }};
             }
         }
+
         std::unique_lock<std::mutex> lck{mtx};
         bool first_task = q.empty();
         q.push(std::move(t));
@@ -92,6 +94,8 @@ public:
             cv.notify_one();
         }
     }
+
+protected:
     ~async_service(){
         if (thread_started && thrd.joinable())
         {
@@ -104,12 +108,15 @@ public:
     }
 };
 
-async_service the_ctx;
 }
 
 namespace {
-template<typename f_t>
-std::exception_ptr call_and_catch(f_t&& f){
+template<typename f_t, typename context_t>
+std::exception_ptr call_and_catch(f_t&& f, context_t&& ctx){
+    if (std::forward<context_t>(ctx).isCanceled()){
+        return std::make_exception_ptr(GAsyncCanceled{});
+    }
+
     std::exception_ptr eptr;
     try {
         std::forward<f_t>(f)();
@@ -120,15 +127,21 @@ std::exception_ptr call_and_catch(f_t&& f){
     return eptr;
 }
 
-template<typename f_t, typename callback_t>
-void call_with_callback(f_t&& f, callback_t&& cb){
-    auto eptr = call_and_catch(std::forward<f_t>(f));
+struct DummyContext {
+    bool isCanceled() const {
+        return false;
+    }
+};
+
+template<typename f_t, typename callback_t, typename context_t>
+void call_with_callback(f_t&& f, callback_t&& cb, context_t&& ctx){
+    auto eptr =  call_and_catch(std::forward<f_t>(f), std::forward<context_t>(ctx));
     std::forward<callback_t>(cb)(eptr);
 }
 
-template<typename f_t>
-void call_with_futute(f_t&& f, std::promise<void>& p){
-    auto eptr = call_and_catch(std::forward<f_t>(f));
+template<typename f_t, typename context_t>
+void call_with_future(f_t&& f, std::promise<void>& p, context_t&& ctx){
+    auto eptr =  call_and_catch(std::forward<f_t>(f), std::forward<context_t>(ctx));
     if (eptr){
         p.set_exception(eptr);
     }
@@ -138,33 +151,76 @@ void call_with_futute(f_t&& f, std::promise<void>& p){
 }
 }//namespace
 
+bool GAsyncContext::cancel(){
+    bool expected = false;
+    bool updated  = cancelation_requested.compare_exchange_strong(expected, true);
+    return updated;
+}
+
+bool GAsyncContext::isCanceled() const {
+    return cancelation_requested.load();
+}
+
+const char* GAsyncCanceled::what() const noexcept {
+    return "GAPI asynchronous operation was canceled";
+}
+
 //For now these async functions are simply wrapping serial version of apply/operator() into a functor.
 //These functors are then serialized into single queue, which is processed by a devoted background thread.
 void async_apply(GComputation& gcomp, std::function<void(std::exception_ptr)>&& callback, GRunArgs &&ins, GRunArgsP &&outs, GCompileArgs &&args){
-    //TODO: use move_through_copy for all args except gcomp
+    //TODO: use copy_through_move_t for all args except gcomp
+    //TODO: avoid code duplication between versions of "async" functions
     auto l = [=]() mutable {
         auto apply_l = [&](){
             gcomp.apply(std::move(ins), std::move(outs), std::move(args));
         };
 
-        call_with_callback(apply_l,std::move(callback));
+        call_with_callback(apply_l,std::move(callback), DummyContext{});
     };
-    impl::the_ctx.add_task(l);
+    impl::async_service::instance().add_task(l);
 }
 
 std::future<void> async_apply(GComputation& gcomp, GRunArgs &&ins, GRunArgsP &&outs, GCompileArgs &&args){
-    move_through_copy<std::promise<void>> prms{{}};
+    util::copy_through_move_t<std::promise<void>> prms{{}};
     auto f = prms.value.get_future();
     auto l = [=]() mutable {
         auto apply_l = [&](){
             gcomp.apply(std::move(ins), std::move(outs), std::move(args));
         };
 
-        call_with_futute(apply_l, prms.value);
+        call_with_future(apply_l, prms.value, DummyContext{});
     };
 
-    impl::the_ctx.add_task(l);
+    impl::async_service::instance().add_task(l);
     return f;
+}
+
+void async_apply(GComputation& gcomp, std::function<void(std::exception_ptr)>&& callback, GRunArgs &&ins, GRunArgsP &&outs, GCompileArgs &&args, GAsyncContext& ctx){
+    //TODO: use copy_through_move_t for all args except gcomp
+    auto l = [=, &ctx]() mutable {
+        auto apply_l = [&](){
+            gcomp.apply(std::move(ins), std::move(outs), std::move(args));
+        };
+
+        call_with_callback(apply_l,std::move(callback), ctx);
+    };
+    impl::async_service::instance().add_task(l);
+}
+
+std::future<void> async_apply(GComputation& gcomp, GRunArgs &&ins, GRunArgsP &&outs, GCompileArgs &&args, GAsyncContext& ctx){
+    util::copy_through_move_t<std::promise<void>> prms{{}};
+    auto f = prms.value.get_future();
+    auto l = [=, &ctx]() mutable {
+        auto apply_l = [&](){
+            gcomp.apply(std::move(ins), std::move(outs), std::move(args));
+        };
+
+        call_with_future(apply_l, prms.value, ctx);
+    };
+
+    impl::async_service::instance().add_task(l);
+    return f;
+
 }
 
 void async(GCompiled& gcmpld, std::function<void(std::exception_ptr)>&& callback, GRunArgs &&ins, GRunArgsP &&outs){
@@ -173,24 +229,51 @@ void async(GCompiled& gcmpld, std::function<void(std::exception_ptr)>&& callback
             gcmpld(std::move(ins), std::move(outs));
         };
 
-        call_with_callback(apply_l,std::move(callback));
+        call_with_callback(apply_l,std::move(callback), DummyContext{});
     };
 
-    impl::the_ctx.add_task(l);
+    impl::async_service::instance().add_task(l);
+}
+
+void async(GCompiled& gcmpld, std::function<void(std::exception_ptr)>&& callback, GRunArgs &&ins, GRunArgsP &&outs, GAsyncContext& ctx){
+    auto l = [=, &ctx]() mutable {
+        auto apply_l = [&](){
+            gcmpld(std::move(ins), std::move(outs));
+        };
+
+        call_with_callback(apply_l,std::move(callback), ctx);
+    };
+
+    impl::async_service::instance().add_task(l);
 }
 
 std::future<void> async(GCompiled& gcmpld, GRunArgs &&ins, GRunArgsP &&outs){
-    move_through_copy<std::promise<void>> prms{{}};
+    util::copy_through_move_t<std::promise<void>> prms{{}};
     auto f = prms.value.get_future();
     auto l = [=]() mutable {
         auto apply_l = [&](){
             gcmpld(std::move(ins), std::move(outs));
         };
 
-        call_with_futute(apply_l, prms.value);
+        call_with_future(apply_l, prms.value, DummyContext{});
     };
 
-    impl::the_ctx.add_task(l);
+    impl::async_service::instance().add_task(l);
+    return f;
+
+}
+std::future<void> async(GCompiled& gcmpld, GRunArgs &&ins, GRunArgsP &&outs, GAsyncContext& ctx){
+    util::copy_through_move_t<std::promise<void>> prms{{}};
+    auto f = prms.value.get_future();
+    auto l = [=, &ctx]() mutable {
+        auto apply_l = [&](){
+            gcmpld(std::move(ins), std::move(outs));
+        };
+
+        call_with_future(apply_l, prms.value, ctx);
+    };
+
+    impl::async_service::instance().add_task(l);
     return f;
 
 }

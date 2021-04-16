@@ -273,7 +273,11 @@ bool TiffDecoder::readHeader()
         {
             bool isGrayScale = photometric == PHOTOMETRIC_MINISWHITE || photometric == PHOTOMETRIC_MINISBLACK;
             uint16 bpp = 8, ncn = isGrayScale ? 1 : 3;
-            CV_TIFF_CHECK_CALL(TIFFGetField(tif, TIFFTAG_BITSPERSAMPLE, &bpp));
+            if (0 == TIFFGetField(tif, TIFFTAG_BITSPERSAMPLE, &bpp))
+            {
+                // TIFF bi-level images don't require TIFFTAG_BITSPERSAMPLE tag
+                bpp = 1;
+            }
             CV_TIFF_CHECK_CALL_DEBUG(TIFFGetField(tif, TIFFTAG_SAMPLESPERPIXEL, &ncn));
 
             m_width = wdth;
@@ -334,6 +338,77 @@ bool TiffDecoder::nextPage()
            readHeader();
 }
 
+static void fixOrientationPartial(Mat &img, uint16 orientation)
+{
+    switch(orientation) {
+        case ORIENTATION_RIGHTTOP:
+        case ORIENTATION_LEFTBOT:
+            flip(img, img, -1);
+            /* fall through */
+
+        case ORIENTATION_LEFTTOP:
+        case ORIENTATION_RIGHTBOT:
+            transpose(img, img);
+            break;
+    }
+}
+
+static void fixOrientationFull(Mat &img, int orientation)
+{
+    switch(orientation) {
+        case ORIENTATION_TOPRIGHT:
+            flip(img, img, 1);
+            break;
+
+        case ORIENTATION_BOTRIGHT:
+            flip(img, img, -1);
+            break;
+
+        case ORIENTATION_BOTLEFT:
+            flip(img, img, 0);
+            break;
+
+        case ORIENTATION_LEFTTOP:
+            transpose(img, img);
+            break;
+
+        case ORIENTATION_RIGHTTOP:
+            transpose(img, img);
+            flip(img, img, 1);
+            break;
+
+        case ORIENTATION_RIGHTBOT:
+            transpose(img, img);
+            flip(img, img, -1);
+            break;
+
+        case ORIENTATION_LEFTBOT:
+            transpose(img, img);
+            flip(img, img, 0);
+            break;
+    }
+}
+
+/**
+ * Fix orientation defined in tag 274.
+ * For 8 bit some corrections are done by TIFFReadRGBAStrip/Tile already.
+ * Not so for 16/32/64 bit.
+ */
+static void fixOrientation(Mat &img, uint16 orientation, int dst_bpp)
+{
+    switch(dst_bpp) {
+        case 8:
+            fixOrientationPartial(img, orientation);
+            break;
+
+        case 16:
+        case 32:
+        case 64:
+            fixOrientationFull(img, orientation);
+            break;
+    }
+}
+
 bool  TiffDecoder::readData( Mat& img )
 {
     int type = img.type();
@@ -359,14 +434,19 @@ bool  TiffDecoder::readData( Mat& img )
         int is_tiled = TIFFIsTiled(tif) != 0;
         bool isGrayScale = photometric == PHOTOMETRIC_MINISWHITE || photometric == PHOTOMETRIC_MINISBLACK;
         uint16 bpp = 8, ncn = isGrayScale ? 1 : 3;
-        CV_TIFF_CHECK_CALL(TIFFGetField(tif, TIFFTAG_BITSPERSAMPLE, &bpp));
+        if (0 == TIFFGetField(tif, TIFFTAG_BITSPERSAMPLE, &bpp))
+        {
+            // TIFF bi-level images don't require TIFFTAG_BITSPERSAMPLE tag
+            bpp = 1;
+        }
         CV_TIFF_CHECK_CALL_DEBUG(TIFFGetField(tif, TIFFTAG_SAMPLESPERPIXEL, &ncn));
         uint16 img_orientation = ORIENTATION_TOPLEFT;
         CV_TIFF_CHECK_CALL_DEBUG(TIFFGetField(tif, TIFFTAG_ORIENTATION, &img_orientation));
-        bool vert_flip = (img_orientation == ORIENTATION_BOTRIGHT) || (img_orientation == ORIENTATION_RIGHTBOT) ||
-                         (img_orientation == ORIENTATION_BOTLEFT) || (img_orientation == ORIENTATION_LEFTBOT);
         const int bitsPerByte = 8;
         int dst_bpp = (int)(img.elemSize1() * bitsPerByte);
+        bool vert_flip = dst_bpp == 8 &&
+                        (img_orientation == ORIENTATION_BOTRIGHT || img_orientation == ORIENTATION_RIGHTBOT ||
+                         img_orientation == ORIENTATION_BOTLEFT || img_orientation == ORIENTATION_LEFTBOT);
         int wanted_channels = normalizeChannelsNumber(img.channels());
 
         if (dst_bpp == 8)
@@ -465,6 +545,7 @@ bool  TiffDecoder::readData( Mat& img )
                                     }
                                     else
                                     {
+                                        CV_CheckEQ(wanted_channels, 3, "TIFF-8bpp: BGR/BGRA images are supported only");
                                         icvCvt_BGRA2BGR_8u_C4C3R(bstart + i*tile_width0*4, 0,
                                                 img.ptr(img_y + tile_height - i - 1, x), 0,
                                                 Size(tile_width, 1), 2);
@@ -472,6 +553,7 @@ bool  TiffDecoder::readData( Mat& img )
                                 }
                                 else
                                 {
+                                    CV_CheckEQ(wanted_channels, 1, "");
                                     icvCvt_BGRA2Gray_8u_C4C1R( bstart + i*tile_width0*4, 0,
                                             img.ptr(img_y + tile_height - i - 1, x), 0,
                                             Size(tile_width, 1), 2);
@@ -497,12 +579,14 @@ bool  TiffDecoder::readData( Mat& img )
                                 {
                                     if (ncn == 1)
                                     {
+                                        CV_CheckEQ(wanted_channels, 3, "");
                                         icvCvt_Gray2BGR_16u_C1C3R(buffer16 + i*tile_width0*ncn, 0,
                                                 img.ptr<ushort>(img_y + i, x), 0,
                                                 Size(tile_width, 1));
                                     }
                                     else if (ncn == 3)
                                     {
+                                        CV_CheckEQ(wanted_channels, 3, "");
                                         icvCvt_RGB2BGR_16u_C3R(buffer16 + i*tile_width0*ncn, 0,
                                                 img.ptr<ushort>(img_y + i, x), 0,
                                                 Size(tile_width, 1));
@@ -517,6 +601,7 @@ bool  TiffDecoder::readData( Mat& img )
                                         }
                                         else
                                         {
+                                            CV_CheckEQ(wanted_channels, 3, "TIFF-16bpp: BGR/BGRA images are supported only");
                                             icvCvt_BGRA2BGR_16u_C4C3R(buffer16 + i*tile_width0*ncn, 0,
                                                 img.ptr<ushort>(img_y + i, x), 0,
                                                 Size(tile_width, 1), 2);
@@ -524,13 +609,12 @@ bool  TiffDecoder::readData( Mat& img )
                                     }
                                     else
                                     {
-                                        icvCvt_BGRA2BGR_16u_C4C3R(buffer16 + i*tile_width0*ncn, 0,
-                                                img.ptr<ushort>(img_y + i, x), 0,
-                                                Size(tile_width, 1), 2);
+                                        CV_Error(Error::StsError, "Not supported");
                                     }
                                 }
                                 else
                                 {
+                                    CV_CheckEQ(wanted_channels, 1, "");
                                     if( ncn == 1 )
                                     {
                                         memcpy(img.ptr<ushort>(img_y + i, x),
@@ -579,6 +663,7 @@ bool  TiffDecoder::readData( Mat& img )
                 }  // for x
             }  // for y
         }
+        fixOrientation(img, img_orientation, dst_bpp);
     }
 
     if (m_hdr && depth >= CV_32F)
@@ -747,6 +832,7 @@ bool TiffEncoder::writeLibTiff( const std::vector<Mat>& img_vec, const std::vect
     for (size_t page = 0; page < img_vec.size(); page++)
     {
         const Mat& img = img_vec[page];
+        CV_Assert(!img.empty());
         int channels = img.channels();
         int width = img.cols, height = img.rows;
         int type = img.type();
@@ -806,6 +892,7 @@ bool TiffEncoder::writeLibTiff( const std::vector<Mat>& img_vec, const std::vect
 
         const int bitsPerByte = 8;
         size_t fileStep = (width * channels * bitsPerChannel) / bitsPerByte;
+        CV_Assert(fileStep > 0);
 
         int rowsPerStrip = (int)((1 << 13) / fileStep);
         readParam(params, TIFFTAG_ROWSPERSTRIP, rowsPerStrip);

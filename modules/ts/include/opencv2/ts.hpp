@@ -180,12 +180,21 @@ using testing::tuple_size;
 using testing::tuple_element;
 
 
-class SkipTestException: public cv::Exception
+namespace details {
+class SkipTestExceptionBase: public cv::Exception
+{
+public:
+    SkipTestExceptionBase(bool handlingTags);
+    SkipTestExceptionBase(const cv::String& message, bool handlingTags);
+};
+}
+
+class SkipTestException: public details::SkipTestExceptionBase
 {
 public:
     int dummy; // workaround for MacOSX Xcode 7.3 bug (don't make class "empty")
-    SkipTestException() : dummy(0) {}
-    SkipTestException(const cv::String& message) : dummy(0) { this->msg = message; }
+    SkipTestException() : details::SkipTestExceptionBase(false), dummy(0) {}
+    SkipTestException(const cv::String& message) : details::SkipTestExceptionBase(message, false), dummy(0) { }
 };
 
 /** Apply tag to the current test
@@ -210,6 +219,38 @@ static inline void applyTestTag(const std::string& tag1, const std::string& tag2
 { applyTestTag_(tag1); applyTestTag_(tag2); applyTestTag_(tag3); checkTestTags(); }
 static inline void applyTestTag(const std::string& tag1, const std::string& tag2, const std::string& tag3, const std::string& tag4)
 { applyTestTag_(tag1); applyTestTag_(tag2); applyTestTag_(tag3); applyTestTag_(tag4); checkTestTags(); }
+static inline void applyTestTag(const std::string& tag1, const std::string& tag2, const std::string& tag3, const std::string& tag4, const std::string& tag5)
+{ applyTestTag_(tag1); applyTestTag_(tag2); applyTestTag_(tag3); applyTestTag_(tag4); applyTestTag_(tag5); checkTestTags(); }
+
+
+/** Append global skip test tags
+*/
+void registerGlobalSkipTag(const std::string& skipTag);
+static inline void registerGlobalSkipTag(const std::string& tag1, const std::string& tag2)
+{ registerGlobalSkipTag(tag1); registerGlobalSkipTag(tag2); }
+static inline void registerGlobalSkipTag(const std::string& tag1, const std::string& tag2, const std::string& tag3)
+{ registerGlobalSkipTag(tag1); registerGlobalSkipTag(tag2); registerGlobalSkipTag(tag3); }
+static inline void registerGlobalSkipTag(const std::string& tag1, const std::string& tag2, const std::string& tag3, const std::string& tag4)
+{ registerGlobalSkipTag(tag1); registerGlobalSkipTag(tag2); registerGlobalSkipTag(tag3); registerGlobalSkipTag(tag4); }
+static inline void registerGlobalSkipTag(const std::string& tag1, const std::string& tag2, const std::string& tag3, const std::string& tag4,
+    const std::string& tag5)
+{
+    registerGlobalSkipTag(tag1); registerGlobalSkipTag(tag2); registerGlobalSkipTag(tag3); registerGlobalSkipTag(tag4);
+    registerGlobalSkipTag(tag5);
+}
+static inline void registerGlobalSkipTag(const std::string& tag1, const std::string& tag2, const std::string& tag3, const std::string& tag4,
+    const std::string& tag5, const std::string& tag6)
+{
+    registerGlobalSkipTag(tag1); registerGlobalSkipTag(tag2); registerGlobalSkipTag(tag3); registerGlobalSkipTag(tag4);
+    registerGlobalSkipTag(tag5); registerGlobalSkipTag(tag6);
+}
+static inline void registerGlobalSkipTag(const std::string& tag1, const std::string& tag2, const std::string& tag3, const std::string& tag4,
+    const std::string& tag5, const std::string& tag6, const std::string& tag7)
+{
+    registerGlobalSkipTag(tag1); registerGlobalSkipTag(tag2); registerGlobalSkipTag(tag3); registerGlobalSkipTag(tag4);
+    registerGlobalSkipTag(tag5); registerGlobalSkipTag(tag6); registerGlobalSkipTag(tag7);
+}
+
 
 
 class TS;
@@ -397,6 +438,9 @@ protected:
 
     // updates progress bar
     virtual int update_progress( int progress, int test_case_idx, int count, double dt );
+
+    // dump test case input parameters
+    virtual void dump_test_case(int test_case_idx, std::ostream* out);
 
     // finds test parameter
     cv::FileNode find_param( const cv::FileStorage& fs, const char* param_name );
@@ -758,7 +802,7 @@ int main(int argc, char **argv) \
 { \
     CV_TRACE_FUNCTION(); \
     { CV_TRACE_REGION("INIT"); \
-    using namespace cvtest; \
+    using namespace cvtest; using namespace opencv_test; \
     TS* ts = TS::ptr(); \
     ts->init(resourcesubdir); \
     __CV_TEST_EXEC_ARGS(CV_TEST_INIT0_ ## INIT0) \

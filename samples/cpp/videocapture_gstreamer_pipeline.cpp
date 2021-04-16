@@ -223,7 +223,7 @@ inline Ptr<VideoWriter> createWriter(const string &backend, const string &file_n
     }
     else if (backend == "ffmpeg")
     {
-        cout << "Created FFMpeg writer ( " << file_name << ", FPS=" << fps << ", Size=" << sz << " )" << endl;
+        cout << "Created FFmpeg writer ( " << file_name << ", FPS=" << fps << ", Size=" << sz << " )" << endl;
         return makePtr<VideoWriter>(file_name, CAP_FFMPEG, getValue(fourccByCodec(), codec, "Invalid codec"), fps, sz, true);
     }
     return Ptr<VideoWriter>();
@@ -266,7 +266,10 @@ int main(int argc, char *argv[])
         cout << "Unsupported mode: " << mode << endl;
         return -1;
     }
-    file_name = samples::findFile(file_name);
+    if (mode == "decode")
+    {
+        file_name = samples::findFile(file_name);
+    }
     cout << "Mode: " << mode << ", Backend: " << backend << ", File: " << file_name << ", Codec: " << codec << endl;
 
     TickMeter total;

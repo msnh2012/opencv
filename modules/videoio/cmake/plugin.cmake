@@ -1,4 +1,4 @@
-function(ocv_create_builtin_videoio_plugin name target videoio_src_file)
+function(ocv_create_builtin_videoio_plugin name target)
 
   ocv_debug_message("ocv_create_builtin_videoio_plugin(${ARGV})")
 
@@ -11,23 +11,45 @@ function(ocv_create_builtin_videoio_plugin name target videoio_src_file)
 
   message(STATUS "Video I/O: add builtin plugin '${name}'")
 
-  add_library(${name} MODULE
-    "${CMAKE_CURRENT_LIST_DIR}/src/${videoio_src_file}"
-  )
+  foreach(src ${ARGN})
+    list(APPEND sources "${CMAKE_CURRENT_LIST_DIR}/src/${src}")
+  endforeach()
+
+  add_library(${name} MODULE ${sources})
   target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
   target_compile_definitions(${name} PRIVATE BUILD_PLUGIN)
   target_link_libraries(${name} PRIVATE ${target})
 
   foreach(mod opencv_videoio opencv_core opencv_imgproc opencv_imgcodecs)
-    target_link_libraries(${name} PRIVATE ${mod})
-    target_include_directories(${name} PRIVATE "${OPENCV_MODULE_${mod}_LOCATION}/include")
+    ocv_target_link_libraries(${name} LINK_PRIVATE ${mod})
+    ocv_target_include_directories(${name} "${OPENCV_MODULE_${mod}_LOCATION}/include")
   endforeach()
+
+  if(WIN32)
+    set(OPENCV_PLUGIN_VERSION "${OPENCV_DLLVERSION}" CACHE STRING "")
+    if(CMAKE_CXX_SIZEOF_DATA_PTR EQUAL 8)
+      set(OPENCV_PLUGIN_ARCH "_64" CACHE STRING "")
+    else()
+      set(OPENCV_PLUGIN_ARCH "" CACHE STRING "")
+    endif()
+  else()
+    set(OPENCV_PLUGIN_VERSION "" CACHE STRING "")
+    set(OPENCV_PLUGIN_ARCH "" CACHE STRING "")
+  endif()
 
   set_target_properties(${name} PROPERTIES
     CXX_STANDARD 11
     CXX_VISIBILITY_PRESET hidden
+    DEBUG_POSTFIX "${OPENCV_DEBUG_POSTFIX}"
+    OUTPUT_NAME "${name}${OPENCV_PLUGIN_VERSION}${OPENCV_PLUGIN_ARCH}"
   )
-  install(TARGETS ${name} LIBRARY DESTINATION ${OPENCV_LIB_INSTALL_PATH} COMPONENT plugins OPTIONAL)
+
+  if(WIN32)
+    set_target_properties(${name} PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${EXECUTABLE_OUTPUT_PATH})
+    install(TARGETS ${name} OPTIONAL LIBRARY DESTINATION ${OPENCV_BIN_INSTALL_PATH} COMPONENT plugins)
+  else()
+    install(TARGETS ${name} OPTIONAL LIBRARY DESTINATION ${OPENCV_LIB_INSTALL_PATH} COMPONENT plugins)
+  endif()
 
   add_dependencies(opencv_videoio_plugins ${name})
 
